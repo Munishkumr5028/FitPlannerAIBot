@@ -25,7 +25,7 @@ mongoose
   });
 
 // Initialize bot with polling
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+const bot = new TelegramBot(process.env.BOT_TOKEN);
 
 // Session storage
 const sessions = {};
