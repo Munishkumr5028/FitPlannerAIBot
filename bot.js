@@ -1,26 +1,38 @@
-// bot.js
 require("dotenv").config();
-require("./db");
 const TelegramBot = require("node-telegram-bot-api");
+const express = require("express");
 const mongoose = require("mongoose");
 const User = require("./models/User");
 const { generateDietPlan } = require("./dietLogic");
 
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+// Check required env vars
+if (!process.env.BOT_TOKEN) {
+  console.error("Error: BOT_TOKEN not set in environment variables.");
+  process.exit(1);
+}
+if (!process.env.MONGO_URI) {
+  console.error("Error: MONGO_URI not set in environment variables.");
+  process.exit(1);
+}
 
-const sessions = {}; // in-memory session store
-const SESSION_TIMEOUT = 5 * 60 * 1000; // 5 minutes
-
+// Connect to MongoDB
 mongoose
   .connect(process.env.MONGO_URI, {
     useNewUrlParser: true,
     useUnifiedTopology: true,
   })
-  .then(() => console.log("✅ MongoDB connected"))
+  .then(() => console.log("✅ MongoDB connected successfully"))
   .catch((err) => {
     console.error("❌ MongoDB connection error:", err);
     process.exit(1);
   });
+
+// Initialize bot with polling
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+
+// Session storage
+const sessions = {};
+const SESSION_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
 function resetSession(chatId) {
   sessions[chatId] = { lastActive: Date.now() };
@@ -32,6 +44,14 @@ function checkSessionTimeout(chatId) {
   return Date.now() - (session.lastActive || 0) > SESSION_TIMEOUT;
 }
 
+function getBmiStatus(bmi) {
+  if (bmi < 18.5) return "Underweight";
+  if (bmi < 25) return "Normal weight";
+  if (bmi < 30) return "Overweight";
+  return "Obesity";
+}
+
+// Telegram Bot Handlers
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
 
@@ -51,36 +71,28 @@ bot.onText(/\/start/, async (msg) => {
         status: getBmiStatus(existingUser.bmi),
       };
       const mealPlan = plan.meals.join("\n");
-      const summary = `
-📝 *Your Saved Info:*
-\
-\
-\`\`\`
-Name     : ${existingUser.name}
-Height   : ${existingUser.height} cm
-Weight   : ${existingUser.weight} kg
-Age      : ${existingUser.age}
-Gender   : ${existingUser.gender}
-Diet     : ${existingUser.diet}
-Activity : ${existingUser.activity}
-Goal     : ${existingUser.goal}
-\`\`\`
-
-📊 *BMI:* ${plan.bmi} (${plan.status})
-🔥 *Calories Needed:* ${plan.calories} kcal
-
-🍽️ *Your Meal Plan:*
-${mealPlan}
-
-💬 Type /reset if you want to create a new plan.
-❤️ Thanks for connecting with us. Developed by *Munish Kumar*.`;
-      bot.sendMessage(chatId, summary, { parse_mode: "Markdown" });
+      bot.sendMessage(
+        chatId,
+        `👋 Welcome back, ${existingUser.name}!\n\n` +
+          `📊 Your current BMI: ${plan.bmi} (${plan.status})\n` +
+          `🔥 Daily Calories: ${plan.calories} kcal\n\n` +
+          `🍽️ Your saved meal plan:\n${mealPlan}\n\n` +
+          `If you want to update your info and get a new diet plan, type /reset.\n` +
+          `Otherwise, enjoy your plan.\n\n` +
+          `❤️ Thanks for connecting with us.\n👨‍💻 Developed by Munish Kumar ❤`
+      );
     } else {
-      bot.sendMessage(chatId, "👋 Welcome to FitPlanner Bot!\n🧑‍💼 What’s your name?");
+      bot.sendMessage(
+        chatId,
+        "🌱 Welcome! Let's start your personalized diet plan.\n👋 What’s your name?"
+      );
     }
   } catch (err) {
     console.error(err);
-    bot.sendMessage(chatId, "⚠️ Sorry, something went wrong. Please try again later.");
+    bot.sendMessage(
+      chatId,
+      "⚠️ Sorry, something went wrong. Please try again later."
+    );
   }
 });
 
@@ -89,7 +101,7 @@ bot.onText(/\/reset/, async (msg) => {
   try {
     await User.deleteOne({ telegramId: chatId });
     resetSession(chatId);
-    bot.sendMessage(chatId, "🗑️ Your data has been reset. Let's start over.\nWhat’s your name?");
+    bot.sendMessage(chatId, "🗑️ Your data has been reset. What’s your name?");
   } catch (err) {
     console.error(err);
     bot.sendMessage(chatId, "⚠️ Unable to reset your data. Please try again.");
@@ -99,11 +111,15 @@ bot.onText(/\/reset/, async (msg) => {
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
-  if (text.startsWith("/")) return;
+
+  if (!text || text.startsWith("/")) return;
+
   if (!sessions[chatId] || checkSessionTimeout(chatId)) {
     resetSession(chatId);
   }
+
   sessions[chatId].lastActive = Date.now();
+
   const session = sessions[chatId];
 
   if (!session.name) {
@@ -147,7 +163,9 @@ bot.on("callback_query", async (query) => {
   const chatId = query.message.chat.id;
   const session = sessions[chatId];
   const data = query.data;
+
   if (!session) return;
+
   session.lastActive = Date.now();
 
   if (data.startsWith("gender_")) {
@@ -192,6 +210,8 @@ bot.on("callback_query", async (query) => {
 
   if (data.startsWith("goal_")) {
     session.goal = data.split("_")[1];
+
+    // Generate diet plan from logic
     const plan = generateDietPlan(session);
     const mealPlan = plan.meals.join("\n");
 
@@ -216,39 +236,34 @@ bot.on("callback_query", async (query) => {
       );
     } catch (err) {
       console.error("DB Save error:", err);
-      return bot.sendMessage(chatId, "⚠️ Could not save your data. Please try again later.");
+      return bot.sendMessage(
+        chatId,
+        "⚠️ Could not save your data. Please try again later."
+      );
     }
 
-    const summary = `
-📝 *Your Provided Info:*
-\`\`\`
-Name     : ${session.name}
-Height   : ${session.height} cm
-Weight   : ${session.weight} kg
-Age      : ${session.age}
-Gender   : ${session.gender}
-Diet     : ${session.diet}
-Activity : ${session.activity}
-Goal     : ${session.goal}
-\`\`\`
+    bot.sendMessage(
+      chatId,
+      `🧑 ${session.name}, here is your personalized diet plan:\n\n` +
+        `📊 BMI: ${plan.bmi} (${getBmiStatus(plan.bmi)})\n` +
+        `🔥 Daily Calories: ${plan.calories} kcal\n\n` +
+        `🍽️ Meal Plan:\n${mealPlan}\n\n` +
+        `Type /reset if you want to create a new plan.\n\n` +
+        `❤️ Thanks for connecting with us.\n👨‍💻 Developed by Munish Kumar ❤`
+    );
 
-📊 *BMI:* ${plan.bmi} (${getBmiStatus(plan.bmi)})
-🔥 *Calories Needed:* ${plan.calories} kcal
-
-🍽️ *Your Meal Plan:*
-${mealPlan}
-
-💬 Type /reset if you want to create a new plan.
-❤️ Thanks for connecting with us. Developed by *Munish Kumar*.`;
-
-    bot.sendMessage(chatId, summary, { parse_mode: "Markdown" });
     delete sessions[chatId];
   }
 });
 
-function getBmiStatus(bmi) {
-  if (bmi < 18.5) return "Underweight";
-  if (bmi < 25) return "Normal weight";
-  if (bmi < 30) return "Overweight";
-  return "Obesity";
-}
+// Express server for Render or other hosts
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get("/", (req, res) => {
+  res.send("🤖 FitPlannerAIBot is running!");
+});
+
+app.listen(PORT, () => {
+  console.log(`🌐 Server running on port ${PORT}`);
+});
